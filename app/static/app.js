@@ -53,6 +53,7 @@ async function loadConfig() {
   $("cfg-minutes").value = cfg.transfer_minutes;
   $("cfg-discount").value = cfg.transfer_discount;
   $("cfg-cap").value = cfg.daily_cap;
+  return cfg;
 }
 
 async function saveConfig() {
@@ -67,6 +68,158 @@ async function saveConfig() {
     toast("规则参数已保存");
   } catch (e) {
     toast(summaryError(e, "参数校验失败"), false);
+  }
+}
+
+/* ---------------- 2. 规则试算对比 ---------------- */
+
+function fillTrialInputs(cfg) {
+  $("trial-split").value = cfg.day_split_hour;
+  $("trial-minutes").value = cfg.transfer_minutes;
+  $("trial-discount").value = cfg.transfer_discount;
+  $("trial-cap").value = cfg.daily_cap;
+}
+
+async function copyCurrentToTrial() {
+  fillTrialInputs(await api("/api/config"));
+  toast("已将当前已保存参数填入草案，可在此基础上修改");
+}
+
+function fmtConfig(c) {
+  return `分界 ${c.day_split_hour}:00 · 换乘 ${c.transfer_minutes} 分钟 · ` +
+         `抵扣 ${yuan(c.transfer_discount)} 元 · 封顶 ${yuan(c.daily_cap)} 元`;
+}
+
+function deltaClass(v) {
+  return v > 0 ? "delta-up" : v < 0 ? "delta-down" : "delta-zero";
+}
+
+function deltaText(v) {
+  return (v > 0 ? "+" : "") + yuan(v);
+}
+
+function renderTrialErrors(p) {
+  const panel = $("trial-errors");
+  panel.hidden = false;
+  $("trial-result").hidden = true;
+
+  const sides = [
+    ["trial-err-current", p.current],
+    ["trial-err-draft", p.draft],
+  ];
+  for (const [blockId, side] of sides) {
+    const block = $(blockId);
+    const ul = block.querySelector("ul");
+    ul.innerHTML = "";
+    const errors = (side && side.errors) || [];
+    for (const e of errors) ul.appendChild(renderErrorLi(e));
+    block.hidden = side ? side.ok !== false : true;
+  }
+}
+
+function renderTrialResult(data) {
+  $("trial-errors").hidden = true;
+  const panel = $("trial-result");
+  panel.hidden = false;
+
+  $("trial-params").innerHTML =
+    `<div><span class="tag tag-cur">当前配置</span>${fmtConfig(data.current.config)}</div>` +
+    `<div><span class="tag tag-draft">草案配置</span>${fmtConfig(data.draft.config)}</div>`;
+
+  const b = data.batch_summary;
+  $("trial-batch").innerHTML =
+    `全批次 <strong>${b.trip_count}</strong> 笔行程：` +
+    `实扣合计 <strong>${yuan(b.current_charge_total)}</strong> 元 → ` +
+    `<strong>${yuan(b.draft_charge_total)}</strong> 元，` +
+    `<span class="${deltaClass(b.charge_diff)}">实扣差额 ${deltaText(b.charge_diff)} 元</span>` +
+    `；优惠合计 ${yuan(b.current_discount_total)} → ${yuan(b.draft_discount_total)} 元` +
+    `（优惠差额 ${deltaText(b.discount_diff)} 元，正=优惠更多）`;
+
+  const tb = $("trial-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const r of data.rows) {
+    const tr = document.createElement("tr");
+    const trip = `${escapeHtml(r.entry_station)} → ${escapeHtml(r.exit_station)}` +
+      `<div class="sub">${r.entry_time} ～ ${r.exit_time}</div>`;
+    // 优惠差额正负的颜色与实扣相反：优惠变多（正）对乘客是好事，用绿色
+    const discCls = r.discount_diff > 0 ? "delta-down"
+      : r.discount_diff < 0 ? "delta-up" : "delta-zero";
+    tr.innerHTML = `
+      <td>${escapeHtml(r.card)}</td>
+      <td class="num">${r.seq}</td>
+      <td class="trip">${trip}</td>
+      <td class="${r.day_changed ? "day-changed" : ""}">${r.current_operating_day}</td>
+      <td class="${r.day_changed ? "day-changed" : ""}">${r.draft_operating_day}</td>
+      <td class="num discount">-${yuan(r.current_discount)}</td>
+      <td class="num discount">-${yuan(r.draft_discount)}</td>
+      <td class="num ${discCls}">${deltaText(r.discount_diff)}</td>
+      <td class="num">${yuan(r.current_charge)}</td>
+      <td class="num charge">${yuan(r.draft_charge)}</td>
+      <td class="num ${deltaClass(r.charge_diff)}">${deltaText(r.charge_diff)}</td>
+      <td class="wrap">${escapeHtml(r.draft_discount_source)}</td>`;
+    tb.appendChild(tr);
+  }
+
+  const cb = $("trial-cards-table").querySelector("tbody");
+  cb.innerHTML = "";
+  for (const c of data.card_summaries) {
+    const tr = document.createElement("tr");
+    const discCls = c.discount_diff > 0 ? "delta-down"
+      : c.discount_diff < 0 ? "delta-up" : "delta-zero";
+    tr.innerHTML = `
+      <td>${escapeHtml(c.card)}</td>
+      <td class="num">${c.trip_count}</td>
+      <td class="num">${yuan(c.current_charge_total)}</td>
+      <td class="num">${yuan(c.draft_charge_total)}</td>
+      <td class="num ${deltaClass(c.charge_diff)}">${deltaText(c.charge_diff)}</td>
+      <td class="num discount">${yuan(c.current_discount_total)}</td>
+      <td class="num discount">${yuan(c.draft_discount_total)}</td>
+      <td class="num ${discCls}">${deltaText(c.discount_diff)}</td>`;
+    cb.appendChild(tr);
+  }
+}
+
+async function runTrialCompare() {
+  const status = $("trial-status");
+  const body = {
+    day_split_hour: Number($("trial-split").value),
+    transfer_minutes: Number($("trial-minutes").value),
+    transfer_discount: Number($("trial-discount").value),
+    daily_cap: Number($("trial-cap").value),
+  };
+  if (Object.values(body).some((v) => !Number.isFinite(v))) {
+    status.textContent = "草案四项参数必须全部填写为有效数字";
+    status.className = "status bad";
+    return;
+  }
+  status.textContent = "试算中…";
+  status.className = "status";
+  $("trial-errors").hidden = true;
+  $("trial-result").hidden = true;
+  try {
+    const data = await api("/api/trial-compare", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    renderTrialResult(data);
+    status.textContent =
+      `试算成功：共对比 ${data.batch_summary.trip_count} 笔行程（草案未保存、账单未写入）`;
+    status.className = "status ok";
+    toast("规则试算完成");
+  } catch (e) {
+    const p = e.payload;
+    if (p && (p.current || p.draft)) {
+      renderTrialErrors(p);
+      const failed = [];
+      if (p.current && p.current.ok === false) failed.push("当前");
+      if (p.draft && p.draft.ok === false) failed.push("草案");
+      status.textContent =
+        `试算未通过：${failed.join("、")}方案存在错误（配置未改动、账单未写入）`;
+    } else {
+      status.textContent = summaryError(e, "试算请求失败");
+    }
+    status.className = "status bad";
+    toast("规则试算未通过", false);
   }
 }
 
@@ -318,6 +471,9 @@ function escapeHtml(s) {
 function bind() {
   $("btn-save-config").addEventListener("click", saveConfig);
 
+  $("btn-run-trial").addEventListener("click", runTrialCompare);
+  $("btn-trial-copy").addEventListener("click", copyCurrentToTrial);
+
   $("btn-save-stations").addEventListener("click", () =>
     saveTextSection("站点", "/api/stations", $("stations-text").value, renderStations));
   $("btn-save-fares").addEventListener("click", () =>
@@ -338,7 +494,8 @@ function bind() {
 async function init() {
   bind();
   try {
-    await loadConfig();
+    const cfg = await loadConfig();
+    fillTrialInputs(cfg);
     renderStations((await api("/api/stations")).items);
     renderFares((await api("/api/fares")).items);
     renderRecords((await api("/api/records")).items);

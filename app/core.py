@@ -123,6 +123,22 @@ class VerifyResult:
     errors: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class TrialResult:
+    """规则试算对比结果。
+
+    ok 为 False 时 current / draft 两个分块各自携带错误数组（原有定位错误）；
+    ok 为 True 时携带对齐后的行程行 rows、按卡汇总 card_summaries 与
+    全批次汇总 batch_summary。
+    """
+    ok: bool
+    current: dict = field(default_factory=dict)
+    draft: dict = field(default_factory=dict)
+    rows: list[dict] = field(default_factory=list)
+    card_summaries: list[dict] = field(default_factory=list)
+    batch_summary: dict = field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # 文本解析（录入）
 # ---------------------------------------------------------------------------
@@ -284,16 +300,24 @@ def operating_day(t: datetime, split_hour: int = 4) -> str:
 # 配置校验
 # ---------------------------------------------------------------------------
 
+def _is_finite_number(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))
+
+
+def _is_int_value(x) -> bool:
+    return _is_finite_number(x) and float(x).is_integer()
+
+
 def validate_config(cfg: Config) -> list[dict]:
     errors: list[dict] = []
-    if cfg.transfer_minutes <= 0:
+    if not _is_int_value(cfg.transfer_minutes) or cfg.transfer_minutes <= 0:
         errors.append(_err("CONFIG_BAD", "换乘有效间隔必须为正整数（分钟）"))
-    if cfg.transfer_discount < 0:
-        errors.append(_err("CONFIG_BAD", "换乘抵扣额不能为负"))
-    if cfg.daily_cap < 0:
-        errors.append(_err("CONFIG_BAD", "每日封顶额不能为负"))
-    if not (0 <= cfg.day_split_hour <= 23):
-        errors.append(_err("CONFIG_BAD", "运营日分界时刻必须在 0-23 之间"))
+    if not _is_finite_number(cfg.transfer_discount) or cfg.transfer_discount < 0:
+        errors.append(_err("CONFIG_BAD", "换乘抵扣额不能为负且必须是有限数字"))
+    if not _is_finite_number(cfg.daily_cap) or cfg.daily_cap < 0:
+        errors.append(_err("CONFIG_BAD", "每日封顶额不能为负且必须是有限数字"))
+    if not _is_int_value(cfg.day_split_hour) or not (0 <= cfg.day_split_hour <= 23):
+        errors.append(_err("CONFIG_BAD", "运营日分界时刻必须是 0-23 之间的整数小时"))
     return errors
 
 
@@ -496,3 +520,139 @@ def verify(stations: list[Station],
         b["seq"] = seq_by_card[b["card"]]
 
     return VerifyResult(ok=True, bills=bills, errors=[])
+
+
+# ---------------------------------------------------------------------------
+# 规则试算对比（不落库、不改配置）
+# ---------------------------------------------------------------------------
+
+def _snap_int(x) -> int | float:
+    """整数型数字快照为 int（如 120.0 -> 120），非整数保留原值。"""
+    return int(x) if _is_finite_number(x) and float(x).is_integer() else x
+
+
+def _config_snapshot(cfg: Config) -> dict:
+    return {
+        "transfer_minutes": _snap_int(cfg.transfer_minutes),
+        "transfer_discount": _round2(cfg.transfer_discount),
+        "daily_cap": _round2(cfg.daily_cap),
+        "day_split_hour": _snap_int(cfg.day_split_hour),
+    }
+
+
+def _index_bills(bills: list[dict]) -> dict[tuple[str, int], dict]:
+    return {(b["card"], b["seq"]): b for b in bills}
+
+
+def trial_compare(stations: list[Station],
+                  fares: list[Fare],
+                  records: list[Swipe],
+                  current_cfg: Config,
+                  draft_cfg: Config) -> TrialResult:
+    """用同一批已保存的刷卡记录，分别按当前配置与草案配置试算计费。
+
+    - 完全复用 verify() 的解析后配对 / 校验 / 计价规则，本函数不做任何写操作；
+    - 任一方案失败（配置参数非法或数据错误）时，返回该方案 verify() 产出的
+      原有定位错误，不产出对比账单；
+    - 两方案都成功时，按 (卡号, 卡内序号) 对齐行程，逐程给出运营日、
+      优惠、实扣及差额，并汇总每张卡与全批次的金额变化。
+    """
+    current = verify(stations, fares, records, current_cfg)
+    draft = verify(stations, fares, records, draft_cfg)
+
+    if not current.ok or not draft.ok:
+        return TrialResult(
+            ok=False,
+            current={"config": _config_snapshot(current_cfg),
+                     "ok": current.ok,
+                     "errors": current.errors},
+            draft={"config": _config_snapshot(draft_cfg),
+                   "ok": draft.ok,
+                   "errors": draft.errors},
+        )
+
+    cur_map = _index_bills(current.bills)
+    draft_map = _index_bills(draft.bills)
+    # 配对与卡内序号仅取决于记录数据本身，两边应当一致；用并集以防万一。
+    keys = sorted(set(cur_map) | set(draft_map))
+
+    rows: list[dict] = []
+    for card, seq in keys:
+        cb = cur_map.get((card, seq))
+        db = draft_map.get((card, seq))
+
+        def pick(key: str):
+            return (cb[key] if cb is not None else None,
+                    db[key] if db is not None else None)
+
+        cur_day, draft_day = pick("operating_day")
+        cur_disc, draft_disc = pick("discount")
+        cur_charge, draft_charge = pick("charged_fare")
+        rows.append({
+            "card": card,
+            "seq": seq,
+            "entry_time": (cb or db)["entry_time"],
+            "exit_time": (cb or db)["exit_time"],
+            "entry_station": (cb or db)["entry_station"],
+            "exit_station": (cb or db)["exit_station"],
+            "from_zone": (cb or db)["from_zone"],
+            "to_zone": (cb or db)["to_zone"],
+            "base_fare": (cb or db)["base_fare"],
+            "current_operating_day": cur_day,
+            "draft_operating_day": draft_day,
+            "day_changed": cur_day != draft_day,
+            "current_discount": cur_disc,
+            "draft_discount": draft_disc,
+            "discount_diff": _round2((draft_disc or 0) - (cur_disc or 0)),
+            "current_charge": cur_charge,
+            "draft_charge": draft_charge,
+            "charge_diff": _round2((draft_charge or 0) - (cur_charge or 0)),
+            "draft_discount_source": db["discount_source"] if db else None,
+            "current_discount_source": cb["discount_source"] if cb else None,
+        })
+
+    card_summaries: list[dict] = []
+    for card in sorted({k[0] for k in keys}):
+        cb_sum = sum(b["charged_fare"] for b in current.bills if b["card"] == card)
+        db_sum = sum(b["charged_fare"] for b in draft.bills if b["card"] == card)
+        cd_sum = sum(b["discount"] for b in current.bills if b["card"] == card)
+        dd_sum = sum(b["discount"] for b in draft.bills if b["card"] == card)
+        card_summaries.append({
+            "card": card,
+            "trip_count": sum(1 for k in keys if k[0] == card),
+            "current_charge_total": _round2(cb_sum),
+            "draft_charge_total": _round2(db_sum),
+            "charge_diff": _round2(db_sum - cb_sum),
+            "current_discount_total": _round2(cd_sum),
+            "draft_discount_total": _round2(dd_sum),
+            "discount_diff": _round2(dd_sum - cd_sum),
+        })
+
+    cur_total = sum(b["charged_fare"] for b in current.bills)
+    draft_total = sum(b["charged_fare"] for b in draft.bills)
+    cur_disc_total = sum(b["discount"] for b in current.bills)
+    draft_disc_total = sum(b["discount"] for b in draft.bills)
+    batch_summary = {
+        "trip_count": len(keys),
+        "current_charge_total": _round2(cur_total),
+        "draft_charge_total": _round2(draft_total),
+        "charge_diff": _round2(draft_total - cur_total),
+        "current_discount_total": _round2(cur_disc_total),
+        "draft_discount_total": _round2(draft_disc_total),
+        "discount_diff": _round2(draft_disc_total - cur_disc_total),
+    }
+
+    return TrialResult(
+        ok=True,
+        current={"config": _config_snapshot(current_cfg),
+                 "ok": True,
+                 "errors": [],
+                 "bill_count": len(current.bills)},
+        draft={"config": _config_snapshot(draft_cfg),
+               "ok": True,
+               "errors": [],
+               "bill_count": len(draft.bills)},
+        rows=rows,
+        card_summaries=card_summaries,
+        batch_summary=batch_summary,
+    )

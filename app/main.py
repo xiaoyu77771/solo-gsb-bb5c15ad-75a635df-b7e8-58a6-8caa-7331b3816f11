@@ -16,9 +16,11 @@ from .core import (
     parse_fares_text,
     parse_records_text,
     parse_stations_text,
+    trial_compare,
+    validate_config,
     verify,
 )
-from .schemas import ConfigIn, TextIn
+from .schemas import ConfigIn, TextIn, TrialConfigIn
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -33,7 +35,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -172,6 +174,58 @@ def get_bills():
         bills = db.list_bills(conn)
         last = db.get_meta(conn, "last_verified_at")
     return {"items": bills, "count": len(bills), "last_verified_at": last}
+
+
+# ---------------------------------------------------------------------------
+# 规则试算对比（只读：不改配置、不写账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/trial-compare")
+def run_trial_compare(body: TrialConfigIn):
+    """用一组未保存的草案参数，对同一批已保存刷卡记录做双边试算。
+
+    - 当前配置（已保存）与草案配置分别复用 core.verify 的配对 / 计价规则；
+    - 任一方案存在错误（CONFIG_BAD 或数据错误）时返回 422，
+      current / draft 各自携带该方案的原有定位错误，不修改任何数据；
+    - 两边均成功时返回按 (卡号, 卡内序号) 对齐的行程行、
+      每张卡汇总与全批次汇总。
+    """
+    draft_cfg = Config(
+        transfer_minutes=body.transfer_minutes,
+        transfer_discount=body.transfer_discount,
+        daily_cap=body.daily_cap,
+        day_split_hour=body.day_split_hour,
+    )
+    with db.connect() as conn:
+        current_cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+        # 草案参数先按核心规则校验（错误返回原有 CONFIG_BAD）；
+        # 合法时把整数型字段规整为 int，使运营日/分钟相关文案与正式配置口径一致。
+        draft_errors = validate_config(draft_cfg)
+        if not draft_errors:
+            draft_cfg = Config(
+                transfer_minutes=int(draft_cfg.transfer_minutes),
+                transfer_discount=draft_cfg.transfer_discount,
+                daily_cap=draft_cfg.daily_cap,
+                day_split_hour=int(draft_cfg.day_split_hour),
+            )
+        result = trial_compare(stations, fares, records, current_cfg, draft_cfg)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False,
+                     "current": result.current,
+                     "draft": result.draft})
+
+    return {
+        "ok": True,
+        "current": result.current,
+        "draft": result.draft,
+        "rows": result.rows,
+        "card_summaries": result.card_summaries,
+        "batch_summary": result.batch_summary,
+    }
 
 
 @app.get("/api/health")
