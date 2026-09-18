@@ -39,6 +39,29 @@
         <button class="btn btn-save" id="btn-save-config" type="button">保存参数</button>
         <span class="hint">行程按「进站时刻」归属运营日，如 03:30 的进站归入前一日。</span>
       </div>
+
+      <div class="compare-draft">
+        <h3>试算草案（仅用于对比，不会保存）</h3>
+        <div class="form-grid">
+          <label>运营日分界时刻（点）
+            <input type="number" id="draft-split" min="0" max="23" />
+          </label>
+          <label>换乘有效间隔（分钟）
+            <input type="number" id="draft-minutes" min="1" />
+          </label>
+          <label>换乘抵扣额（元）
+            <input type="number" id="draft-discount" min="0" step="0.01" />
+          </label>
+          <label>每卡每日封顶额（元）
+            <input type="number" id="draft-cap" min="0" step="0.01" />
+          </label>
+        </div>
+        <div class="row-actions">
+          <button class="btn btn-primary" id="btn-compare" type="button">▶ 试算对比</button>
+          <button class="btn btn-ghost" id="btn-copy-config" type="button">以当前参数为草案</button>
+          <span class="hint">试算为只读操作：不修改已保存参数、不生成账单；结果见下方「6. 规则试算对比」。</span>
+        </div>
+      </div>
     </section>
 
     <!-- 站点分区 -->
@@ -130,6 +153,65 @@ A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <!-- 规则试算对比 -->
+    <section class="card" id="sec-compare">
+      <h2>6. 规则试算对比</h2>
+      <div class="row-actions">
+        <span id="compare-status" class="status">尚未试算。在第 1 区填写「试算草案」后点击「试算对比」。</span>
+      </div>
+
+      <div id="compare-errors">
+        <div id="compare-errors-current" class="errors-panel" hidden>
+          <h3>❌ 当前配置试算未通过 —— 该方案未产出任何账单</h3>
+          <ul id="compare-errors-current-list"></ul>
+        </div>
+        <div id="compare-errors-draft" class="errors-panel" hidden>
+          <h3>❌ 草案配置试算未通过 —— 该方案未产出任何账单</h3>
+          <ul id="compare-errors-draft-list"></ul>
+        </div>
+      </div>
+
+      <div id="compare-panel" hidden>
+        <h3>行程对比（按卡号 + 卡内序号对齐，差额 = 草案 − 当前）</h3>
+        <div class="table-wrap">
+          <table id="compare-table">
+            <thead>
+              <tr>
+                <th rowspan="2">卡号</th><th rowspan="2">#</th>
+                <th rowspan="2">行程（进站 → 出站）</th>
+                <th colspan="2">运营日</th>
+                <th colspan="2">优惠（元）</th>
+                <th colspan="2">实扣（元）</th>
+                <th rowspan="2">差额（元）</th>
+              </tr>
+              <tr>
+                <th>当前</th><th>草案</th>
+                <th>当前</th><th>草案</th>
+                <th>当前</th><th>草案</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h3>分卡汇总</h3>
+        <div class="table-wrap">
+          <table id="compare-card-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>行程数</th>
+                <th>当前合计（元）</th><th>草案合计（元）</th><th>差额（元）</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h3>全批次汇总</h3>
+        <div id="compare-total" class="compare-total"></div>
       </div>
     </section>
 

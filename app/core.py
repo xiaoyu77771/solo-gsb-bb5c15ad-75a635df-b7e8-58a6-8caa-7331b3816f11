@@ -496,3 +496,80 @@ def verify(stations: list[Station],
         b["seq"] = seq_by_card[b["card"]]
 
     return VerifyResult(ok=True, bills=bills, errors=[])
+
+
+# ---------------------------------------------------------------------------
+# 规则试算对比
+# ---------------------------------------------------------------------------
+
+def _side_summary(bill: Optional[dict]) -> Optional[dict]:
+    """提取一套方案中某行程的对比字段；该侧缺失时为 None。"""
+    if bill is None:
+        return None
+    return {
+        "operating_day": bill["operating_day"],
+        "discount": _round2(bill["discount"]),
+        "charged_fare": _round2(bill["charged_fare"]),
+        "discount_source": bill["discount_source"],
+    }
+
+
+def compare_bills(current_bills: list[dict], draft_bills: list[dict]) -> dict:
+    """按 (卡号, 卡内序号) 对齐两套账单，计算行程差额与汇总。
+
+    两套账单来自同一批刷卡记录、仅规则参数不同（配对结果与配置无关），
+    因此行程集合一致，可按 (card, seq) 一一对齐；个别缺失时以存在的
+    一侧为参照，缺失侧金额按 0 计。差额一律为「草案 − 当前」。
+    """
+    cur_by_key = {(b["card"], b["seq"]): b for b in current_bills}
+    drf_by_key = {(b["card"], b["seq"]): b for b in draft_bills}
+    keys = sorted(set(cur_by_key) | set(drf_by_key))
+
+    trips: list[dict] = []
+    per_card: dict[str, dict] = {}
+    total_current = 0.0
+    total_draft = 0.0
+
+    for card, seq in keys:
+        cur = cur_by_key.get((card, seq))
+        drf = drf_by_key.get((card, seq))
+        ref = cur or drf
+        assert ref is not None  # keys 来自两侧并集，至少一侧存在
+        cur_charge = _round2(cur["charged_fare"]) if cur else 0.0
+        drf_charge = _round2(drf["charged_fare"]) if drf else 0.0
+        diff = _round2(drf_charge - cur_charge)
+
+        trips.append({
+            "card": card,
+            "seq": seq,
+            "entry_time": ref["entry_time"],
+            "exit_time": ref["exit_time"],
+            "entry_station": ref["entry_station"],
+            "exit_station": ref["exit_station"],
+            "base_fare": _round2(ref["base_fare"]),
+            "current": _side_summary(cur),
+            "draft": _side_summary(drf),
+            "diff": diff,
+        })
+
+        agg = per_card.setdefault(card, {
+            "card": card, "trips": 0,
+            "current_total": 0.0, "draft_total": 0.0, "diff": 0.0,
+        })
+        agg["trips"] += 1
+        agg["current_total"] = _round2(agg["current_total"] + cur_charge)
+        agg["draft_total"] = _round2(agg["draft_total"] + drf_charge)
+        agg["diff"] = _round2(agg["draft_total"] - agg["current_total"])
+        total_current = _round2(total_current + cur_charge)
+        total_draft = _round2(total_draft + drf_charge)
+
+    return {
+        "trips": trips,
+        "per_card": [per_card[c] for c in sorted(per_card)],
+        "total": {
+            "trips": len(trips),
+            "current_total": total_current,
+            "draft_total": total_draft,
+            "diff": _round2(total_draft - total_current),
+        },
+    }

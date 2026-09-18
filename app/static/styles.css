@@ -208,3 +208,37 @@ td.wrap { white-space: normal; min-width: 240px; }
   padding: 16px 0;
 }
 .footer a { color: var(--primary); }
+
+/* ---------------- 规则试算对比 ---------------- */
+.compare-draft {
+  border-top: 1px dashed var(--border);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+.compare-draft h3 {
+  font-size: 14px;
+  margin: 0 0 10px;
+  color: var(--text);
+}
+
+/* 差额：草案更贵=红，更省=绿，持平=灰 */
+.diff-pos { color: var(--danger-text); font-weight: 600; }
+.diff-neg { color: var(--save); font-weight: 600; }
+.diff-zero { color: var(--muted); }
+
+/* 有差额的行程行、运营日发生变化的单元格高亮 */
+#compare-table tbody tr.changed td { background: #fff8e6; }
+#compare-table td.hl { background: #fdf0d5; font-weight: 600; }
+
+.compare-total {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  background: #f0f4fa;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin-top: 8px;
+}
+#compare-errors .errors-panel + .errors-panel { margin-top: 10px; }

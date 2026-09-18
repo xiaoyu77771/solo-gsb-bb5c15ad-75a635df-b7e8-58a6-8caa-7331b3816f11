@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .core import (
     Config,
+    compare_bills,
     parse_fares_text,
     parse_records_text,
     parse_stations_text,
@@ -43,6 +44,15 @@ def _parse_error_response(errors: list[dict], status: int = 422) -> JSONResponse
                         content={"ok": False, "errors": errors})
 
 
+def _config_dict(cfg: Config) -> dict:
+    return {
+        "transfer_minutes": cfg.transfer_minutes,
+        "transfer_discount": cfg.transfer_discount,
+        "daily_cap": cfg.daily_cap,
+        "day_split_hour": cfg.day_split_hour,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
@@ -51,12 +61,7 @@ def _parse_error_response(errors: list[dict], status: int = 422) -> JSONResponse
 def get_config():
     with db.connect() as conn:
         cfg = db.get_config(conn)
-    return {
-        "transfer_minutes": cfg.transfer_minutes,
-        "transfer_discount": cfg.transfer_discount,
-        "daily_cap": cfg.daily_cap,
-        "day_split_hour": cfg.day_split_hour,
-    }
+    return _config_dict(cfg)
 
 
 @app.put("/api/config")
@@ -172,6 +177,58 @@ def get_bills():
         bills = db.list_bills(conn)
         last = db.get_meta(conn, "last_verified_at")
     return {"items": bills, "count": len(bills), "last_verified_at": last}
+
+
+# ---------------------------------------------------------------------------
+# 规则试算对比
+# ---------------------------------------------------------------------------
+
+@app.post("/api/compare")
+def run_compare(body: ConfigIn):
+    """规则试算对比：同一批已存刷卡记录分别按当前配置与草案配置计价。
+
+    纯只读操作：不修改配置、不写账单（即使两套方案都成功）。
+    任一方案存在数据错误时返回 422，错误按方案分别给出，
+    格式与 /api/verify 的定位错误完全一致；两套方案均成功时，
+    返回按 (卡号, 卡内序号) 对齐的行程对比及分卡 / 全批次汇总。
+    """
+    draft_cfg = Config(
+        transfer_minutes=body.transfer_minutes,
+        transfer_discount=body.transfer_discount,
+        daily_cap=body.daily_cap,
+        day_split_hour=body.day_split_hour,
+    )
+    with db.connect() as conn:
+        current_cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+
+    # 复用同一套核验 / 配对 / 计价逻辑，仅规则参数不同
+    current = verify(stations, fares, records, current_cfg)
+    draft = verify(stations, fares, records, draft_cfg)
+
+    if not (current.ok and draft.ok):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "current": {"ok": current.ok, "errors": current.errors},
+                "draft": {"ok": draft.ok, "errors": draft.errors},
+            })
+
+    return {
+        "ok": True,
+        "current": {
+            "ok": True,
+            "config": _config_dict(current_cfg),
+            "bill_count": len(current.bills),
+        },
+        "draft": {
+            "ok": True,
+            "config": _config_dict(draft_cfg),
+            "bill_count": len(draft.bills),
+        },
+        "comparison": compare_bills(current.bills, draft.bills),
+    }
 
 
 @app.get("/api/health")

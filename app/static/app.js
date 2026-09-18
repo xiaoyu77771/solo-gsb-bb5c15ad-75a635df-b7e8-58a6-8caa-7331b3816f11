@@ -53,6 +53,15 @@ async function loadConfig() {
   $("cfg-minutes").value = cfg.transfer_minutes;
   $("cfg-discount").value = cfg.transfer_discount;
   $("cfg-cap").value = cfg.daily_cap;
+  // 草案初始跟随当前已保存参数，之后由用户自由修改（不保存）
+  copyConfigToDraft();
+}
+
+function copyConfigToDraft() {
+  $("draft-split").value = $("cfg-split").value;
+  $("draft-minutes").value = $("cfg-minutes").value;
+  $("draft-discount").value = $("cfg-discount").value;
+  $("draft-cap").value = $("cfg-cap").value;
 }
 
 async function saveConfig() {
@@ -242,6 +251,119 @@ async function runVerify() {
   }
 }
 
+/* ---------------- 6. 规则试算对比 ---------------- */
+
+function diffText(v) {
+  const n = Number(v);
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  return sign + Math.abs(n).toFixed(2);
+}
+
+function diffClass(v) {
+  const n = Number(v);
+  if (n > 0) return "diff-pos";   // 草案更贵
+  if (n < 0) return "diff-neg";   // 草案更省
+  return "diff-zero";
+}
+
+function renderComparison(comp) {
+  const tb = $("compare-table").querySelector("tbody");
+  tb.innerHTML = "";
+  if (!comp.trips.length) {
+    tb.innerHTML = `<tr><td colspan="10" class="num">两套方案下均无行程账单</td></tr>`;
+  }
+  for (const t of comp.trips) {
+    const cur = t.current || {};
+    const drf = t.draft || {};
+    const tr = document.createElement("tr");
+    if (Number(t.diff) !== 0) tr.className = "changed";
+    const dayHl = cur.operating_day !== drf.operating_day ? ' class="hl"' : "";
+    tr.innerHTML = `
+      <td>${escapeHtml(t.card)}</td>
+      <td class="num">${t.seq}</td>
+      <td>${t.entry_time} ${escapeHtml(t.entry_station)} → ${t.exit_time} ${escapeHtml(t.exit_station)}</td>
+      <td>${cur.operating_day || "—"}</td>
+      <td${dayHl}>${drf.operating_day || "—"}</td>
+      <td class="num discount">-${yuan(cur.discount || 0)}</td>
+      <td class="num discount">-${yuan(drf.discount || 0)}</td>
+      <td class="num charge">${yuan(cur.charged_fare || 0)}</td>
+      <td class="num charge">${yuan(drf.charged_fare || 0)}</td>
+      <td class="num ${diffClass(t.diff)}">${diffText(t.diff)}</td>`;
+    tb.appendChild(tr);
+  }
+
+  const cb = $("compare-card-table").querySelector("tbody");
+  cb.innerHTML = "";
+  for (const c of comp.per_card) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(c.card)}</td>
+      <td class="num">${c.trips}</td>
+      <td class="num">${yuan(c.current_total)}</td>
+      <td class="num">${yuan(c.draft_total)}</td>
+      <td class="num ${diffClass(c.diff)}">${diffText(c.diff)}</td>`;
+    cb.appendChild(tr);
+  }
+
+  const t = comp.total;
+  $("compare-total").innerHTML = `
+    <span>行程数 <b>${t.trips}</b></span>
+    <span>当前合计 <b>${yuan(t.current_total)}</b> 元</span>
+    <span>草案合计 <b>${yuan(t.draft_total)}</b> 元</span>
+    <span class="${diffClass(t.diff)}">差额（草案 − 当前）<b>${diffText(t.diff)}</b> 元</span>`;
+}
+
+function showSchemeErrors(scheme, info) {
+  const panel = $(`compare-errors-${scheme}`);
+  const ul = $(`compare-errors-${scheme}-list`);
+  ul.innerHTML = "";
+  if (!info || info.ok !== false || !info.errors || !info.errors.length) {
+    panel.hidden = true;
+    return 0;
+  }
+  for (const err of info.errors) ul.appendChild(renderErrorLi(err));
+  panel.hidden = false;
+  return info.errors.length;
+}
+
+async function runCompare() {
+  const status = $("compare-status");
+  const body = {
+    day_split_hour: Number($("draft-split").value),
+    transfer_minutes: Number($("draft-minutes").value),
+    transfer_discount: Number($("draft-discount").value),
+    daily_cap: Number($("draft-cap").value),
+  };
+  status.textContent = "试算中…";
+  status.className = "status";
+  try {
+    const data = await api("/api/compare", { method: "POST", body: JSON.stringify(body) });
+    renderComparison(data.comparison);
+    showSchemeErrors("current", null);
+    showSchemeErrors("draft", null);
+    $("compare-panel").hidden = false;
+    const t = data.comparison.total;
+    status.textContent = `试算完成：${t.trips} 笔行程，当前 ${yuan(t.current_total)} 元 → 草案 ${yuan(t.draft_total)} 元（差额 ${diffText(t.diff)} 元）。未改配置、未写账单。`;
+    status.className = "status ok";
+    toast("试算对比完成");
+  } catch (e) {
+    const p = e.payload || {};
+    $("compare-panel").hidden = true;
+    const shown = showSchemeErrors("current", p.current) +
+                  showSchemeErrors("draft", p.draft);
+    if (shown > 0) {
+      status.textContent = `试算未通过：共 ${shown} 个数据错误（未改配置、未写账单）`;
+      status.className = "status bad";
+      toast(`试算未通过：${shown} 个数据错误`, false);
+    } else {
+      status.textContent = summaryError(e, "试算失败");
+      status.className = "status bad";
+      toast(summaryError(e, "试算失败"), false);
+    }
+  }
+  $("sec-compare").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -277,6 +399,7 @@ async function loadDemo() {
   $("cfg-minutes").value = DEMO.config.transfer_minutes;
   $("cfg-discount").value = DEMO.config.transfer_discount;
   $("cfg-cap").value = DEMO.config.daily_cap;
+  copyConfigToDraft();
   $("stations-text").value = DEMO.stations;
   $("fares-text").value = DEMO.fares;
   $("records-text").value = DEMO.records;
@@ -302,7 +425,11 @@ function summaryError(e, fallback) {
     const line = first.location && first.location.line;
     return `${fallback}：${line ? "第 " + line + " 行 " : ""}${first.message}`;
   }
-  if (e.payload && e.payload.detail) return e.payload.detail;
+  const detail = e.payload && e.payload.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length && detail[0].msg) {
+    return `${fallback}：${detail[0].msg}`;
+  }
   return fallback;
 }
 
@@ -333,6 +460,11 @@ function bind() {
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);
+  $("btn-compare").addEventListener("click", runCompare);
+  $("btn-copy-config").addEventListener("click", () => {
+    copyConfigToDraft();
+    toast("已将当前参数复制为试算草案");
+  });
 }
 
 async function init() {

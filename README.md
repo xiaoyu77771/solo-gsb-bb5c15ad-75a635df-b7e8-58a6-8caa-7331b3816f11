@@ -51,6 +51,10 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
    - 同卡两条记录时刻完全相同 → `DUPLICATE_SWIPE`（重复刷卡）
    - 同卡出站早于进站、或排序后存在逆序 → `TIME_REVERSED`（时间逆序）
    - 错误信息同时给出卡号、时刻、站点与**原始文本行号**。
+7. **规则试算对比**：在第 1 区「试算草案」中填写一组**未保存**的规则参数，
+   系统用同一批已存刷卡记录分别按「当前配置」与「草案配置」完整计价并对比。
+   试算复用与正式核验完全相同的解析、配对与计价逻辑，且为**纯只读**操作：
+   不修改已保存参数、不生成/清除账单。
 
 账单字段：卡号、卡内序号、运营日、进站/出站时刻、进出站点与分区、
 **基础票价、优惠额、优惠来源说明、实扣额、当日累计额（/封顶额）**。
@@ -89,6 +93,26 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 删除矩阵中的某个分区对       -> MISSING_FARE
 ```
 
+## 规则试算对比
+
+在正式修改规则参数前，可以先「试算」一组草案参数的影响：
+
+1. 在第 **1. 规则参数** 区下半部分「试算草案」中填写未保存的
+   换乘时限 / 抵扣额 / 每日封顶 / 运营日分界（初始值跟随当前已保存参数，
+   可点「以当前参数为草案」重置）。
+2. 点击 **「▶ 试算对比」**：后端用同一批**已保存**的刷卡记录，
+   分别按当前配置与草案配置各跑一次完整核验计价（复用同一套
+   解析 / 配对 / 计价代码），结果展示在第 **6. 规则试算对比** 区。
+3. 两边均成功时：
+   - **行程对比表**按「卡号 + 卡内序号」对齐，逐笔列出两套方案的
+     运营日、优惠、实扣与差额（差额 = 草案 − 当前；红色=草案更贵，绿色=更省，
+     运营日变化的单元格会高亮）；
+   - **分卡汇总**给出每张卡的行程数与金额变化；
+   - **全批次汇总**给出整批合计与总差额。
+4. 任一方案存在数据错误时：页面按方案分别展示与正式核验完全一致的
+   定位错误（接口返回 422），且**不改配置、不写账单**——试算在任何
+   情况下都是只读的，不影响已保存的参数与最近一次核验账单。
+
 ## HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -99,8 +123,51 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 | GET/PUT | `/api/fares` | 读取 / 整批替换票价矩阵 |
 | GET/PUT | `/api/records` | 读取 / 整批替换刷卡记录 |
 | POST | `/api/verify` | 执行核验；成功写入账单，失败返回 422 与错误数组 |
+| POST | `/api/compare` | 规则试算对比（只读）：body 为草案参数，同 `PUT /api/config` 的字段 |
 | GET | `/api/bills` | 读取最近一次成功核验的账单 |
 | GET | `/api/health` | 健康检查 |
+
+`POST /api/compare` 请求体示例：
+
+```json
+{ "transfer_minutes": 30, "transfer_discount": 2.0, "daily_cap": 8.0, "day_split_hour": 0 }
+```
+
+两套方案均成功时（HTTP 200）：
+
+```json
+{
+  "ok": true,
+  "current": { "ok": true, "config": { "transfer_minutes": 90, "transfer_discount": 1.0, "daily_cap": 10.0, "day_split_hour": 4 }, "bill_count": 5 },
+  "draft":   { "ok": true, "config": { "transfer_minutes": 30, "transfer_discount": 2.0, "daily_cap": 8.0,  "day_split_hour": 0 }, "bill_count": 5 },
+  "comparison": {
+    "trips": [
+      {
+        "card": "A001", "seq": 2,
+        "entry_time": "2026-09-18 09:10:00", "exit_time": "2026-09-18 09:50:00",
+        "entry_station": "中心公园", "exit_station": "大学城", "base_fare": 3.0,
+        "current": { "operating_day": "2026-09-18", "discount": 1.0, "charged_fare": 2.0, "discount_source": "换乘优惠（…）" },
+        "draft":   { "operating_day": "2026-09-18", "discount": 0.0, "charged_fare": 3.0, "discount_source": "无" },
+        "diff": 1.0
+      }
+    ],
+    "per_card": [
+      { "card": "A001", "trips": 4, "current_total": 10.0, "draft_total": 8.0, "diff": -2.0 }
+    ],
+    "total": { "trips": 5, "current_total": 13.0, "draft_total": 11.0, "diff": -2.0 }
+  }
+}
+```
+
+任一方案存在数据错误时（HTTP 422，不改动任何数据）：
+
+```json
+{
+  "ok": false,
+  "current": { "ok": false, "errors": [ { "code": "MISSING_EXIT", "message": "…", "location": { "line": 9, "card": "B002" } } ] },
+  "draft":   { "ok": false, "errors": [ … ] }
+}
+```
 
 核验失败响应示例（HTTP 422）：
 
@@ -148,6 +215,8 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **金额精度**：业务层以元计算并保留两位小数；落库统一转整数分，避免浮点误差。
 - **事务原子性**：整批替换基础数据、核验写账单均在单事务内完成；核验失败时清空
   `trip_bill`，因此任何时刻读到的账单要么是上一次完整成功的结果，要么为空。
+- **试算只读**：`/api/compare` 只在内存中对两套配置各跑一次 `verify()` 并做
+  账单对齐汇总，不执行任何写库操作，可放心反复试算。
 - **数据位置**：容器内 `DB_PATH=/data/bus.db`，compose 用命名卷 `bus-data` 持久化；
   可用环境变量 `DB_PATH` 覆盖路径。
 - **无外部前端依赖**：页面由 FastAPI 直接以静态文件提供，无需 npm/CDN，
